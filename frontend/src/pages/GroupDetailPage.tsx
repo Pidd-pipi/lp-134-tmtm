@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { groupAPI } from '../services/api';
 import { SupportGroup, GroupMessage } from '../types';
 import { useAuth } from '../context/AuthContext';
+import GroupCheckIn from '../components/GroupCheckIn';
 
 const GroupDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -127,6 +128,21 @@ const GroupDetailPage: React.FC = () => {
               </button>
             )}
           </div>
+
+          {user && isMember && (
+            <GroupCheckIn
+              groupId={group.id}
+              isLeader={group.members?.some(
+                (m: any) => m.userId === user.id && m.role === 'leader'
+              ) || false}
+            />
+          )}
+
+          {user && !isMember && (
+            <div className="bg-white rounded-lg shadow-md p-6 mb-6 text-center text-gray-400 text-sm">
+              加入小组后可参与每日心情打卡
+            </div>
+          )}
 
           <div className="bg-white rounded-lg shadow-md">
             <div className="p-6 border-b">

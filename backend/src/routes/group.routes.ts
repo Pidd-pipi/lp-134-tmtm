@@ -26,10 +26,22 @@ const createCheckInSchema = z.object({
 });
 
 const submitCheckInSchema = z.object({
-  status: z.enum(['COMPLETED', 'MISSED']),
-  response: z.string().optional(),
-  moodRating: z.number().min(1).max(10).optional()
+  response: z.string().min(1).max(500),
+  moodRating: z.number().int().min(1).max(10)
 });
+
+const startOfDay = (date: Date): Date => {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+const dayKey = (date: Date): string => {
+  const d = new Date(date);
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${month}-${day}`;
+};
 
 router.get('/', async (req, res) => {
   try {
@@ -409,12 +421,34 @@ router.post('/checkin/:templateId', authMiddleware, async (req: AuthRequest, res
       return res.status(403).json({ error: '您不是小组成员' });
     }
 
-    const existingCheckIn = await prisma.checkIn.create({
+    const todayStart = startOfDay(new Date());
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+
+    const existingCheckIn = await prisma.checkIn.findFirst({
+      where: {
+        templateId,
+        memberId: member.id,
+        createdAt: {
+          gte: todayStart,
+          lt: tomorrowStart
+        }
+      }
+    });
+
+    if (existingCheckIn) {
+      return res.status(400).json({
+        error: '今天已经打过卡了',
+        checkIn: existingCheckIn
+      });
+    }
+
+    const checkIn = await prisma.checkIn.create({
       data: {
         templateId,
         memberId: member.id,
         userId,
-        status: validated.status,
+        status: 'COMPLETED',
         response: validated.response,
         moodRating: validated.moodRating
       }
@@ -422,13 +456,99 @@ router.post('/checkin/:templateId', authMiddleware, async (req: AuthRequest, res
 
     res.json({
       message: '打卡成功',
-      checkIn: existingCheckIn
+      checkIn
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return sendValidationError(res, error);
     }
     sendInternalError(res, error, '打卡错误', '打卡失败');
+  }
+});
+
+router.get('/:id/checkins', authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user!.id;
+
+    const member = await prisma.groupMember.findUnique({
+      where: {
+        groupId_userId: {
+          groupId: id,
+          userId
+        }
+      }
+    });
+
+    if (!member) {
+      return res.status(403).json({ error: '您不是小组成员' });
+    }
+
+    const templates = await prisma.checkInTemplate.findMany({
+      where: { groupId: id },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    const todayStart = startOfDay(new Date());
+
+    // 查询近90天的打卡记录，用于计算最近七天和连续天数
+    const historyStart = new Date(todayStart);
+    historyStart.setDate(historyStart.getDate() - 90);
+
+    const checkIns = await prisma.checkIn.findMany({
+      where: {
+        memberId: member.id,
+        createdAt: { gte: historyStart }
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    // 每天取当天最新一条记录
+    const byDay = new Map<string, typeof checkIns[number]>();
+    for (const checkIn of checkIns) {
+      byDay.set(dayKey(checkIn.createdAt), checkIn);
+    }
+
+    const week = [];
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date(todayStart);
+      date.setDate(date.getDate() - i);
+      const record = byDay.get(dayKey(date));
+      week.push({
+        date: dayKey(date),
+        checkedIn: Boolean(record),
+        moodRating: record?.moodRating ?? null,
+        response: record?.response ?? null
+      });
+    }
+
+    // 连续完成天数：今天还没打卡时从昨天往前数，不中断
+    let streak = 0;
+    const cursor = new Date(todayStart);
+    if (!byDay.has(dayKey(cursor))) {
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    while (byDay.has(dayKey(cursor))) {
+      streak += 1;
+      cursor.setDate(cursor.getDate() - 1);
+    }
+
+    const todayKey = dayKey(new Date());
+    const templatesWithToday = templates.map((template) => {
+      const todayCheckIn =
+        checkIns.find(
+          (c) => c.templateId === template.id && dayKey(c.createdAt) === todayKey
+        ) ?? null;
+      return { ...template, todayCheckIn };
+    });
+
+    res.json({
+      templates: templatesWithToday,
+      week,
+      streak
+    });
+  } catch (error) {
+    sendInternalError(res, error, '获取打卡记录错误', '获取打卡记录失败');
   }
 });
 
