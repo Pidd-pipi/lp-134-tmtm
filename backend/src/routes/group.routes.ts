@@ -1,10 +1,20 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import prisma from '../config/prisma.js';
 import { authMiddleware, AuthRequest } from '../middleware/auth.middleware.js';
 import { sendInternalError, sendValidationError } from '../utils/httpResponses.js';
+import {
+  toChinaDay,
+  getChinaDateKey,
+  dayToKey,
+  getLastNDays,
+  calculateStreak
+} from '../utils/date.js';
 
 const router = Router();
+
+const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
 const createGroupSchema = z.object({
   name: z.string().min(1).max(100),
@@ -26,9 +36,23 @@ const createCheckInSchema = z.object({
 });
 
 const submitCheckInSchema = z.object({
-  status: z.enum(['COMPLETED', 'MISSED']),
-  response: z.string().optional(),
-  moodRating: z.number().min(1).max(10).optional()
+  response: z.string().trim().min(1, '请写一句今天的感受').max(500),
+  moodRating: z.number({ invalid_type_error: '请选择 1-10 的心情评分' }).int().min(1).max(10)
+});
+
+const serializeCheckIn = (checkIn: {
+  id: string;
+  response: string | null;
+  moodRating: number | null;
+  checkInDate: Date;
+  createdAt: Date;
+}) => ({
+  id: checkIn.id,
+  response: checkIn.response,
+  moodRating: checkIn.moodRating,
+  // DATE 列以 UTC 午夜读回，其 UTC 年月日即存储的日历日
+  checkInDate: dayToKey(checkIn.checkInDate),
+  createdAt: checkIn.createdAt
 });
 
 router.get('/', async (req, res) => {
@@ -347,7 +371,7 @@ router.post('/:id/checkin-templates', authMiddleware, async (req: AuthRequest, r
     const validated = createCheckInSchema.parse(req.body);
     const userId = req.user!.id;
 
-    const isLeader = await prisma.groupMember.findUnique({
+    const membership = await prisma.groupMember.findUnique({
       where: {
         groupId_userId: {
           groupId: id,
@@ -356,8 +380,8 @@ router.post('/:id/checkin-templates', authMiddleware, async (req: AuthRequest, r
       }
     });
 
-    if (!isLeader || isLeader.role !== 'leader') {
-      return res.status(403).json({ error: '只有组长可以创建打卡' });
+    if (!membership || membership.role !== 'leader') {
+      return res.status(403).json({ error: '只有组长可以发布打卡' });
     }
 
     const template = await prisma.checkInTemplate.create({
@@ -370,7 +394,7 @@ router.post('/:id/checkin-templates', authMiddleware, async (req: AuthRequest, r
     });
 
     res.json({
-      message: '打卡模板创建成功',
+      message: '今日打卡发布成功',
       template
     });
   } catch (error) {
@@ -381,19 +405,19 @@ router.post('/:id/checkin-templates', authMiddleware, async (req: AuthRequest, r
   }
 });
 
-router.post('/checkin/:templateId', authMiddleware, async (req: AuthRequest, res) => {
+// 我在某个模板下的今日打卡与连续天数
+router.get('/checkin/:templateId/today', authMiddleware, async (req: AuthRequest, res) => {
   try {
     const { templateId } = req.params;
-    const validated = submitCheckInSchema.parse(req.body);
     const userId = req.user!.id;
 
     const template = await prisma.checkInTemplate.findUnique({
       where: { id: templateId },
-      include: { group: true }
+      select: { id: true, groupId: true }
     });
 
     if (!template) {
-      return res.status(404).json({ error: '打卡模板不存在' });
+      return res.status(404).json({ error: '打卡不存在' });
     }
 
     const member = await prisma.groupMember.findUnique({
@@ -409,20 +433,206 @@ router.post('/checkin/:templateId', authMiddleware, async (req: AuthRequest, res
       return res.status(403).json({ error: '您不是小组成员' });
     }
 
-    const existingCheckIn = await prisma.checkIn.create({
-      data: {
-        templateId,
-        memberId: member.id,
-        userId,
-        status: validated.status,
-        response: validated.response,
-        moodRating: validated.moodRating
+    const today = toChinaDay();
+    const todayKey = getChinaDateKey();
+
+    const [todayCheckIn, completedDays] = await Promise.all([
+      prisma.checkIn.findUnique({
+        where: {
+          templateId_memberId_checkInDate: {
+            templateId,
+            memberId: member.id,
+            checkInDate: today
+          }
+        }
+      }),
+      prisma.checkIn.findMany({
+        where: {
+          memberId: member.id,
+          templateId,
+          status: 'COMPLETED'
+        },
+        select: { checkInDate: true }
+      })
+    ]);
+
+    const dateKeys = new Set(completedDays.map(c => dayToKey(c.checkInDate)));
+
+    res.json({
+      date: todayKey,
+      completed: Boolean(todayCheckIn),
+      checkIn: todayCheckIn ? serializeCheckIn(todayCheckIn) : null,
+      streak: calculateStreak(dateKeys)
+    });
+  } catch (error) {
+    sendInternalError(res, error, '获取今日打卡错误', '获取今日打卡失败');
+  }
+});
+
+// 我在某个模板下最近 7 天的心情记录
+router.get('/checkin/:templateId/history', authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const { templateId } = req.params;
+    const userId = req.user!.id;
+
+    const template = await prisma.checkInTemplate.findUnique({
+      where: { id: templateId },
+      select: { id: true, groupId: true, title: true }
+    });
+
+    if (!template) {
+      return res.status(404).json({ error: '打卡不存在' });
+    }
+
+    const member = await prisma.groupMember.findUnique({
+      where: {
+        groupId_userId: {
+          groupId: template.groupId,
+          userId
+        }
       }
     });
 
+    if (!member) {
+      return res.status(403).json({ error: '您不是小组成员' });
+    }
+
+    const days = getLastNDays(7);
+    const rangeStart = days[0];
+
+    const records = await prisma.checkIn.findMany({
+      where: {
+        memberId: member.id,
+        templateId,
+        checkInDate: { gte: rangeStart }
+      },
+      orderBy: { checkInDate: 'asc' }
+    });
+
+    const byDay = new Map(records.map(r => [dayToKey(r.checkInDate), r]));
+    const allCompleted = await prisma.checkIn.findMany({
+      where: { memberId: member.id, templateId, status: 'COMPLETED' },
+      select: { checkInDate: true }
+    });
+    const dateKeys = new Set(allCompleted.map(c => dayToKey(c.checkInDate)));
+
+    // 没有记录的日期留空（null），不按 0 分处理
+    const week = days.map(day => {
+      const key = dayToKey(day);
+      const record = byDay.get(key);
+      return {
+        date: key,
+        weekday: WEEKDAYS[day.getUTCDay()],
+        moodRating: record?.moodRating ?? null,
+        response: record?.response ?? null
+      };
+    });
+
+    res.json({
+      template: { id: template.id, title: template.title },
+      today: getChinaDateKey(),
+      week,
+      streak: calculateStreak(dateKeys)
+    });
+  } catch (error) {
+    sendInternalError(res, error, '获取打卡历史错误', '获取打卡历史失败');
+  }
+});
+
+router.post('/checkin/:templateId', authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const { templateId } = req.params;
+    const validated = submitCheckInSchema.parse(req.body);
+    const userId = req.user!.id;
+
+    const template = await prisma.checkInTemplate.findUnique({
+      where: { id: templateId },
+      include: { group: true }
+    });
+
+    if (!template) {
+      return res.status(404).json({ error: '打卡不存在' });
+    }
+
+    const member = await prisma.groupMember.findUnique({
+      where: {
+        groupId_userId: {
+          groupId: template.groupId,
+          userId
+        }
+      }
+    });
+
+    if (!member) {
+      return res.status(403).json({ error: '您不是小组成员' });
+    }
+
+    const today = toChinaDay();
+
+    // 同一模板当天重复提交：保留原记录，返回 409 提示已经打过卡
+    const existingCheckIn = await prisma.checkIn.findUnique({
+      where: {
+        templateId_memberId_checkInDate: {
+          templateId,
+          memberId: member.id,
+          checkInDate: today
+        }
+      }
+    });
+
+    if (existingCheckIn) {
+      return res.status(409).json({
+        error: '今天已经打过卡了，原记录已保留',
+        checkIn: serializeCheckIn(existingCheckIn)
+      });
+    }
+
+    let checkIn;
+    try {
+      checkIn = await prisma.checkIn.create({
+        data: {
+          templateId,
+          memberId: member.id,
+          userId,
+          status: 'COMPLETED',
+          response: validated.response,
+          moodRating: validated.moodRating,
+          checkInDate: today
+        }
+      });
+    } catch (dbError) {
+      // 并发提交时唯一索引兜底
+      if (
+        dbError instanceof Prisma.PrismaClientKnownRequestError &&
+        dbError.code === 'P2002'
+      ) {
+        const raceRecord = await prisma.checkIn.findUniqueOrThrow({
+          where: {
+            templateId_memberId_checkInDate: {
+              templateId,
+              memberId: member.id,
+              checkInDate: today
+            }
+          }
+        });
+        return res.status(409).json({
+          error: '今天已经打过卡了，原记录已保留',
+          checkIn: serializeCheckIn(raceRecord)
+        });
+      }
+      throw dbError;
+    }
+
+    const allCompleted = await prisma.checkIn.findMany({
+      where: { memberId: member.id, templateId, status: 'COMPLETED' },
+      select: { checkInDate: true }
+    });
+    const dateKeys = new Set(allCompleted.map(c => dayToKey(c.checkInDate)));
+
     res.json({
       message: '打卡成功',
-      checkIn: existingCheckIn
+      checkIn: serializeCheckIn(checkIn),
+      streak: calculateStreak(dateKeys)
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

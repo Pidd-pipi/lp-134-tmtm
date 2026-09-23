@@ -95,6 +95,7 @@ export interface SupportGroup {
   createdAt: string;
   members: GroupMember[];
   messages?: GroupMessage[];
+  checkInTemplates?: CheckInTemplate[];
   _count?: { members: number };
 }
 
@@ -114,6 +115,44 @@ export interface GroupMessage {
   content: string;
   createdAt: string;
   user: User;
+}
+
+export interface CheckInTemplate {
+  id: string;
+  groupId: string;
+  title: string;
+  description: string | null;
+  reminderTime: string;
+  createdAt: string;
+}
+
+export interface CheckIn {
+  id: string;
+  response: string | null;
+  moodRating: number | null;
+  checkInDate: string;
+  createdAt: string;
+}
+
+export interface TodayCheckIn {
+  date: string;
+  completed: boolean;
+  checkIn: CheckIn | null;
+  streak: number;
+}
+
+export interface CheckInWeekDay {
+  date: string;
+  weekday: string;
+  moodRating: number | null;
+  response: string | null;
+}
+
+export interface CheckInHistory {
+  template: { id: string; title: string };
+  today: string;
+  week: CheckInWeekDay[];
+  streak: number;
 }
 
 export interface Favorite {

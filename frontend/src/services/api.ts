@@ -88,7 +88,11 @@ export const groupAPI = {
     api.post(`/groups/${groupId}/messages`, data),
   createCheckInTemplate: (groupId: string, data: { title: string; description?: string; reminderTime: string }) =>
     api.post(`/groups/${groupId}/checkin-templates`, data),
-  submitCheckIn: (templateId: string, data: { status: 'COMPLETED' | 'MISSED'; response?: string; moodRating?: number }) =>
+  getTodayCheckIn: (templateId: string) =>
+    api.get(`/groups/checkin/${templateId}/today`),
+  getCheckInHistory: (templateId: string) =>
+    api.get(`/groups/checkin/${templateId}/history`),
+  submitCheckIn: (templateId: string, data: { response: string; moodRating: number }) =>
     api.post(`/groups/checkin/${templateId}`, data)
 };
 

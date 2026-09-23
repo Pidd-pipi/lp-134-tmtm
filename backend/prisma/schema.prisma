@@ -276,12 +276,15 @@ model CheckIn {
   status          CheckInStatus
   response        String?
   moodRating      Int?
+  checkInDate     DateTime        @db.Date
   createdAt       DateTime        @default(now())
-  
+
   template        CheckInTemplate @relation(fields: [templateId], references: [id])
   member          GroupMember     @relation(fields: [memberId], references: [id])
   user            User            @relation(fields: [userId], references: [id])
-  
+
+  @@unique([templateId, memberId, checkInDate])
+  @@index([memberId, checkInDate])
   @@map("checkins")
 }
 

@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { groupAPI } from '../services/api';
 import { SupportGroup, GroupMessage } from '../types';
 import { useAuth } from '../context/AuthContext';
+import GroupCheckIn from '../components/GroupCheckIn';
 
 const GroupDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -10,6 +11,7 @@ const GroupDetailPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [newMessage, setNewMessage] = useState('');
   const [isMember, setIsMember] = useState(false);
+  const [templatesVersion, setTemplatesVersion] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { user } = useAuth();
 
@@ -29,6 +31,12 @@ const GroupDetailPage: React.FC = () => {
     };
     fetchGroup();
   }, [id, user]);
+
+  const refreshGroup = async () => {
+    const response = await groupAPI.getGroup(id!);
+    setGroup(response.data);
+    setTemplatesVersion(v => v + 1);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -127,6 +135,22 @@ const GroupDetailPage: React.FC = () => {
               </button>
             )}
           </div>
+
+          {isMember && (
+            <div className="mb-6">
+              <GroupCheckIn
+                groupId={group.id}
+                templates={group.checkInTemplates || []}
+                isLeader={
+                  group.members?.some(
+                    (m: any) => m.userId === user?.id && m.role === 'leader'
+                  ) || false
+                }
+                templatesVersion={templatesVersion}
+                onTemplatesChange={refreshGroup}
+              />
+            </div>
+          )}
 
           <div className="bg-white rounded-lg shadow-md">
             <div className="p-6 border-b">
